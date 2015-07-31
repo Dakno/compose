@@ -121,7 +121,7 @@ class ServiceTest(DockerClientTestCase):
         service = self.create_service('db', cpu_shares=73)
         container = service.create_container()
         service.start_container(container)
-        self.assertEqual(container.inspect()['Config']['CpuShares'], 73)
+        self.assertEqual(container.get('HostConfig.CpuShares'), 73)
 
     def test_build_extra_hosts(self):
         # string
@@ -183,7 +183,7 @@ class ServiceTest(DockerClientTestCase):
         service = self.create_service('db', cpuset='0')
         container = service.create_container()
         service.start_container(container)
-        self.assertEqual(container.inspect()['Config']['Cpuset'], '0')
+        self.assertEqual(container.get('HostConfig.CpusetCpus'), '0')
 
     def test_create_container_with_read_only_root_fs(self):
         read_only = True
@@ -220,6 +220,52 @@ class ServiceTest(DockerClientTestCase):
         actual_host_path = volumes[container_path]
         self.assertTrue(path.basename(actual_host_path) == path.basename(host_path),
                         msg=("Last component differs: %s, %s" % (actual_host_path, host_path)))
+
+    def test_recreate_preserves_volume_with_trailing_slash(self):
+        """
+        When the Compose file specifies a trailing slash in the container path, make
+        sure we copy the volume over when recreating.
+        """
+        service = self.create_service('data', volumes=['/data/'])
+        old_container = create_and_start_container(service)
+        volume_path = old_container.get('Volumes')['/data']
+
+        new_container = service.recreate_container(old_container)
+        self.assertEqual(new_container.get('Volumes')['/data'], volume_path)
+
+    def test_duplicate_volume_trailing_slash(self):
+        """
+        When an image specifies a volume, and the Compose file specifies a host path
+        but adds a trailing slash, make sure that we don't create duplicate binds.
+        """
+        host_path = '/tmp/data'
+        container_path = '/data'
+        volumes = ['{}:{}/'.format(host_path, container_path)]
+
+        tmp_container = self.client.create_container(
+            'busybox', 'true',
+            volumes={container_path: {}},
+            labels={'com.docker.compose.test_image': 'true'},
+        )
+        image = self.client.commit(tmp_container)['Id']
+
+        service = self.create_service('db', image=image, volumes=volumes)
+        old_container = create_and_start_container(service)
+
+        self.assertEqual(
+            old_container.get('Config.Volumes'),
+            {container_path: {}},
+        )
+
+        service = self.create_service('db', image=image, volumes=volumes)
+        new_container = service.recreate_container(old_container)
+
+        self.assertEqual(
+            new_container.get('Config.Volumes'),
+            {container_path: {}},
+        )
+
+        self.assertEqual(service.containers(stopped=False), [new_container])
 
     @patch.dict(os.environ)
     def test_create_container_with_home_and_env_var_in_volume_path(self):

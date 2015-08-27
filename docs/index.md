@@ -53,7 +53,7 @@ Compose has commands for managing the whole lifecycle of your application:
 - [Get started with Django](django.md)
 - [Get started with Rails](rails.md)
 - [Get started with Wordpress](wordpress.md)
-- [Command line reference](cli.md)
+- [Command line reference](/reference)
 - [Yaml file reference](yml.md)
 - [Compose environment variables](env.md)
 - [Compose command line completion](completion.md)
@@ -161,7 +161,7 @@ Now, when you run `docker-compose up`, Compose will pull a Redis image, build an
     web_1   |  * Running on http://0.0.0.0:5000/
     web_1   |  * Restarting with stat
 
-If you're using [Docker Machine](https://docs.docker.com/machine), then `docker-machine ip MACHINE_VM` will tell you its address and you can open `http://MACHINE_VM_IP:5000` in a browser. 
+If you're using [Docker Machine](https://docs.docker.com/machine), then `docker-machine ip MACHINE_VM` will tell you its address and you can open `http://MACHINE_VM_IP:5000` in a browser.
 
 If you're not using Boot2docker and are on linux, then the web app should now be listening on port 5000 on your Docker daemon host. If http://0.0.0.0:5000 doesn't resolve, you can also try localhost:5000.
 
@@ -201,7 +201,7 @@ At this point, you have seen the basics of how Compose works.
 
 - Next, try the quick start guide for [Django](django.md),
   [Rails](rails.md), or [Wordpress](wordpress.md).
-- See the reference guides for complete details on the [commands](cli.md), the
+- See the reference guides for complete details on the [commands](/reference), the
   [configuration file](yml.md) and [environment variables](env.md).
 
 ## Release Notes

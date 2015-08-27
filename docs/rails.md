@@ -117,7 +117,7 @@ Finally, you need to create the database. In another terminal, run:
 
     $ docker-compose run web rake db:create
 
-That's it. Your app should now be running on port 3000 on your Docker daemon. If you're using [Docker Machine](https://docs.docker.com/machine), then `docker-machine ip MACHINE_VM` returns the Docker host IP address. 
+That's it. Your app should now be running on port 3000 on your Docker daemon. If you're using [Docker Machine](https://docs.docker.com/machine), then `docker-machine ip MACHINE_VM` returns the Docker host IP address.
 
 
 ## More Compose documentation
@@ -127,7 +127,7 @@ That's it. Your app should now be running on port 3000 on your Docker daemon. If
 - [Get started with Django](django.md)
 - [Get started with Rails](rails.md)
 - [Get started with Wordpress](wordpress.md)
-- [Command line reference](cli.md)
+- [Command line reference](/reference)
 - [Yaml file reference](yml.md)
 - [Compose environment variables](env.md)
 - [Compose command line completion](completion.md)

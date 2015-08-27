@@ -1,16 +1,22 @@
-from __future__ import unicode_literals
 from __future__ import absolute_import
-from functools import reduce
+from __future__ import unicode_literals
+
 import logging
+from functools import reduce
 
 from docker.errors import APIError
 
-from .config import get_service_name_from_net, ConfigurationError
-from .const import DEFAULT_TIMEOUT, LABEL_PROJECT, LABEL_SERVICE, LABEL_ONE_OFF
+from .config import ConfigurationError
+from .config import get_service_name_from_net
+from .const import DEFAULT_TIMEOUT
+from .const import LABEL_ONE_OFF
+from .const import LABEL_PROJECT
+from .const import LABEL_SERVICE
 from .container import Container
 from .legacy import check_for_legacy_containers
 from .service import Service
 from .utils import parallel_execute
+
 
 log = logging.getLogger(__name__)
 
@@ -151,7 +157,9 @@ class Project(object):
                 try:
                     links.append((self.get_service(service_name), link_name))
                 except NoSuchService:
-                    raise ConfigurationError('Service "%s" has a link to service "%s" which does not exist.' % (service_dict['name'], service_name))
+                    raise ConfigurationError(
+                        'Service "%s" has a link to service "%s" which does not '
+                        'exist.' % (service_dict['name'], service_name))
             del service_dict['links']
         return links
 
@@ -167,7 +175,11 @@ class Project(object):
                         container = Container.from_id(self.client, volume_name)
                         volumes_from.append(container)
                     except APIError:
-                        raise ConfigurationError('Service "%s" mounts volumes from "%s", which is not the name of a service or container.' % (service_dict['name'], volume_name))
+                        raise ConfigurationError(
+                            'Service "%s" mounts volumes from "%s", which is '
+                            'not the name of a service or container.' % (
+                                service_dict['name'],
+                                volume_name))
             del service_dict['volumes_from']
         return volumes_from
 
@@ -182,7 +194,11 @@ class Project(object):
                     try:
                         net = Container.from_id(self.client, net_name)
                     except APIError:
-                        raise ConfigurationError('Service "%s" is trying to use the network of "%s", which is not the name of a service or container.' % (service_dict['name'], net_name))
+                        raise ConfigurationError(
+                            'Service "%s" is trying to use the network of "%s", '
+                            'which is not the name of a service or container.' % (
+                                service_dict['name'],
+                                net_name))
             else:
                 net = service_dict['net']
 
@@ -204,6 +220,14 @@ class Project(object):
             msg_index=lambda c: c.name,
             msg="Stopping"
         )
+
+    def pause(self, service_names=None, **options):
+        for service in reversed(self.get_services(service_names)):
+            service.pause(**options)
+
+    def unpause(self, service_names=None, **options):
+        for service in self.get_services(service_names):
+            service.unpause(**options)
 
     def kill(self, service_names=None, **options):
         parallel_execute(
@@ -310,11 +334,11 @@ class Project(object):
         else:
             service_names = self.service_names
 
-        containers = [
+        containers = list(filter(None, [
             Container.from_ps(self.client, container)
             for container in self.client.containers(
                 all=stopped,
-                filters={'label': self.labels(one_off=one_off)})]
+                filters={'label': self.labels(one_off=one_off)})]))
 
         def matches_service_names(container):
             return container.labels.get(LABEL_SERVICE) in service_names
@@ -326,7 +350,7 @@ class Project(object):
                 self.service_names,
             )
 
-        return filter(matches_service_names, containers)
+        return [c for c in containers if matches_service_names(c)]
 
     def _inject_deps(self, acc, service):
         dep_names = service.get_dependency_names()

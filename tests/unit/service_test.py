@@ -1,27 +1,24 @@
-from __future__ import unicode_literals
 from __future__ import absolute_import
-
-from .. import unittest
-import mock
+from __future__ import unicode_literals
 
 import docker
 from docker.utils import LogConfig
 
-from compose.service import Service
+from .. import mock
+from .. import unittest
+from compose.const import LABEL_ONE_OFF
+from compose.const import LABEL_PROJECT
+from compose.const import LABEL_SERVICE
 from compose.container import Container
-from compose.const import LABEL_SERVICE, LABEL_PROJECT, LABEL_ONE_OFF
-from compose.service import (
-    ConfigError,
-    NeedsBuildError,
-    NoSuchImageError,
-    build_port_bindings,
-    build_volume_binding,
-    get_container_data_volumes,
-    merge_volume_bindings,
-    parse_repository_tag,
-    parse_volume_spec,
-    split_port,
-)
+from compose.service import build_volume_binding
+from compose.service import ConfigError
+from compose.service import get_container_data_volumes
+from compose.service import merge_volume_bindings
+from compose.service import NeedsBuildError
+from compose.service import NoSuchImageError
+from compose.service import parse_repository_tag
+from compose.service import parse_volume_spec
+from compose.service import Service
 
 
 class ServiceTest(unittest.TestCase):
@@ -29,27 +26,7 @@ class ServiceTest(unittest.TestCase):
     def setUp(self):
         self.mock_client = mock.create_autospec(docker.Client)
 
-    def test_name_validations(self):
-        self.assertRaises(ConfigError, lambda: Service(name='', image='foo'))
-
-        self.assertRaises(ConfigError, lambda: Service(name=' ', image='foo'))
-        self.assertRaises(ConfigError, lambda: Service(name='/', image='foo'))
-        self.assertRaises(ConfigError, lambda: Service(name='!', image='foo'))
-        self.assertRaises(ConfigError, lambda: Service(name='\xe2', image='foo'))
-
-        Service('a', image='foo')
-        Service('foo', image='foo')
-        Service('foo-bar', image='foo')
-        Service('foo.bar', image='foo')
-        Service('foo_bar', image='foo')
-        Service('_', image='foo')
-        Service('___', image='foo')
-        Service('-', image='foo')
-        Service('--', image='foo')
-        Service('.__.', image='foo')
-
     def test_project_validation(self):
-        self.assertRaises(ConfigError, lambda: Service('bar'))
         self.assertRaises(ConfigError, lambda: Service(name='foo', project='>', image='foo'))
 
         Service(name='foo', project='bar.bar__', image='foo')
@@ -57,14 +34,14 @@ class ServiceTest(unittest.TestCase):
     def test_containers(self):
         service = Service('db', self.mock_client, 'myproject', image='foo')
         self.mock_client.containers.return_value = []
-        self.assertEqual(service.containers(), [])
+        self.assertEqual(list(service.containers()), [])
 
     def test_containers_with_containers(self):
         self.mock_client.containers.return_value = [
             dict(Name=str(i), Image='foo', Id=i) for i in range(3)
         ]
         service = Service('db', self.mock_client, 'myproject', image='foo')
-        self.assertEqual([c.id for c in service.containers()], range(3))
+        self.assertEqual([c.id for c in service.containers()], list(range(3)))
 
         expected_labels = [
             '{0}=myproject'.format(LABEL_PROJECT),
@@ -75,6 +52,18 @@ class ServiceTest(unittest.TestCase):
         self.mock_client.containers.assert_called_once_with(
             all=False,
             filters={'label': expected_labels})
+
+    def test_container_without_name(self):
+        self.mock_client.containers.return_value = [
+            {'Image': 'foo', 'Id': '1', 'Name': '1'},
+            {'Image': 'foo', 'Id': '2', 'Name': None},
+            {'Image': 'foo', 'Id': '3'},
+        ]
+        service = Service('db', self.mock_client, 'myproject', image='foo')
+
+        self.assertEqual([c.id for c in service.containers()], ['1'])
+        self.assertEqual(service._next_container_number(), 2)
+        self.assertEqual(service.get_container(1).id, '1')
 
     def test_get_volumes_from_container(self):
         container_id = 'aabbccddee'
@@ -108,66 +97,21 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(service._get_volumes_from(), [container_id])
         from_service.create_container.assert_called_once_with()
 
-    def test_split_port_with_host_ip(self):
-        internal_port, external_port = split_port("127.0.0.1:1000:2000")
-        self.assertEqual(internal_port, "2000")
-        self.assertEqual(external_port, ("127.0.0.1", "1000"))
-
-    def test_split_port_with_protocol(self):
-        internal_port, external_port = split_port("127.0.0.1:1000:2000/udp")
-        self.assertEqual(internal_port, "2000/udp")
-        self.assertEqual(external_port, ("127.0.0.1", "1000"))
-
-    def test_split_port_with_host_ip_no_port(self):
-        internal_port, external_port = split_port("127.0.0.1::2000")
-        self.assertEqual(internal_port, "2000")
-        self.assertEqual(external_port, ("127.0.0.1", None))
-
-    def test_split_port_with_host_port(self):
-        internal_port, external_port = split_port("1000:2000")
-        self.assertEqual(internal_port, "2000")
-        self.assertEqual(external_port, "1000")
-
-    def test_split_port_no_host_port(self):
-        internal_port, external_port = split_port("2000")
-        self.assertEqual(internal_port, "2000")
-        self.assertEqual(external_port, None)
-
-    def test_split_port_invalid(self):
-        with self.assertRaises(ConfigError):
-            split_port("0.0.0.0:1000:2000:tcp")
-
-    def test_build_port_bindings_with_one_port(self):
-        port_bindings = build_port_bindings(["127.0.0.1:1000:1000"])
-        self.assertEqual(port_bindings["1000"], [("127.0.0.1", "1000")])
-
-    def test_build_port_bindings_with_matching_internal_ports(self):
-        port_bindings = build_port_bindings(["127.0.0.1:1000:1000", "127.0.0.1:2000:1000"])
-        self.assertEqual(port_bindings["1000"], [("127.0.0.1", "1000"), ("127.0.0.1", "2000")])
-
-    def test_build_port_bindings_with_nonmatching_internal_ports(self):
-        port_bindings = build_port_bindings(["127.0.0.1:1000:1000", "127.0.0.1:2000:2000"])
-        self.assertEqual(port_bindings["1000"], [("127.0.0.1", "1000")])
-        self.assertEqual(port_bindings["2000"], [("127.0.0.1", "2000")])
-
     def test_split_domainname_none(self):
         service = Service('foo', image='foo', hostname='name', client=self.mock_client)
-        self.mock_client.containers.return_value = []
         opts = service._get_container_create_options({'image': 'foo'}, 1)
         self.assertEqual(opts['hostname'], 'name', 'hostname')
         self.assertFalse('domainname' in opts, 'domainname')
 
     def test_memory_swap_limit(self):
         service = Service(name='foo', image='foo', hostname='name', client=self.mock_client, mem_limit=1000000000, memswap_limit=2000000000)
-        self.mock_client.containers.return_value = []
         opts = service._get_container_create_options({'some': 'overrides'}, 1)
-        self.assertEqual(opts['memswap_limit'], 2000000000)
-        self.assertEqual(opts['mem_limit'], 1000000000)
+        self.assertEqual(opts['host_config']['MemorySwap'], 2000000000)
+        self.assertEqual(opts['host_config']['Memory'], 1000000000)
 
     def test_log_opt(self):
-        log_opt = {'address': 'tcp://192.168.0.42:123'}
+        log_opt = {'syslog-address': 'tcp://192.168.0.42:123'}
         service = Service(name='foo', image='foo', hostname='name', client=self.mock_client, log_driver='syslog', log_opt=log_opt)
-        self.mock_client.containers.return_value = []
         opts = service._get_container_create_options({'some': 'overrides'}, 1)
 
         self.assertIsInstance(opts['host_config']['LogConfig'], LogConfig)
@@ -180,7 +124,6 @@ class ServiceTest(unittest.TestCase):
             hostname='name.domain.tld',
             image='foo',
             client=self.mock_client)
-        self.mock_client.containers.return_value = []
         opts = service._get_container_create_options({'image': 'foo'}, 1)
         self.assertEqual(opts['hostname'], 'name', 'hostname')
         self.assertEqual(opts['domainname'], 'domain.tld', 'domainname')
@@ -192,7 +135,6 @@ class ServiceTest(unittest.TestCase):
             image='foo',
             domainname='domain.tld',
             client=self.mock_client)
-        self.mock_client.containers.return_value = []
         opts = service._get_container_create_options({'image': 'foo'}, 1)
         self.assertEqual(opts['hostname'], 'name', 'hostname')
         self.assertEqual(opts['domainname'], 'domain.tld', 'domainname')
@@ -204,10 +146,22 @@ class ServiceTest(unittest.TestCase):
             domainname='domain.tld',
             image='foo',
             client=self.mock_client)
-        self.mock_client.containers.return_value = []
         opts = service._get_container_create_options({'image': 'foo'}, 1)
         self.assertEqual(opts['hostname'], 'name.sub', 'hostname')
         self.assertEqual(opts['domainname'], 'domain.tld', 'domainname')
+
+    def test_get_container_create_options_with_name_option(self):
+        service = Service(
+            'foo',
+            image='foo',
+            client=self.mock_client,
+            container_name='foo1')
+        name = 'the_new_name'
+        opts = service._get_container_create_options(
+            {'name': name},
+            1,
+            one_off=True)
+        self.assertEqual(opts['name'], name)
 
     def test_get_container_not_found(self):
         self.mock_client.containers.return_value = []
@@ -244,6 +198,16 @@ class ServiceTest(unittest.TestCase):
             tag='latest',
             stream=True)
 
+    @mock.patch('compose.service.log', autospec=True)
+    def test_pull_image_digest(self, mock_log):
+        service = Service('foo', client=self.mock_client, image='someimage@sha256:1234')
+        service.pull()
+        self.mock_client.pull.assert_called_once_with(
+            'someimage',
+            tag='sha256:1234',
+            stream=True)
+        mock_log.info.assert_called_once_with('Pulling foo (someimage@sha256:1234)...')
+
     @mock.patch('compose.service.Container', autospec=True)
     def test_recreate_container(self, _):
         mock_container = mock.create_autospec(Container)
@@ -269,12 +233,16 @@ class ServiceTest(unittest.TestCase):
         mock_container.stop.assert_called_once_with(timeout=1)
 
     def test_parse_repository_tag(self):
-        self.assertEqual(parse_repository_tag("root"), ("root", ""))
-        self.assertEqual(parse_repository_tag("root:tag"), ("root", "tag"))
-        self.assertEqual(parse_repository_tag("user/repo"), ("user/repo", ""))
-        self.assertEqual(parse_repository_tag("user/repo:tag"), ("user/repo", "tag"))
-        self.assertEqual(parse_repository_tag("url:5000/repo"), ("url:5000/repo", ""))
-        self.assertEqual(parse_repository_tag("url:5000/repo:tag"), ("url:5000/repo", "tag"))
+        self.assertEqual(parse_repository_tag("root"), ("root", "", ":"))
+        self.assertEqual(parse_repository_tag("root:tag"), ("root", "tag", ":"))
+        self.assertEqual(parse_repository_tag("user/repo"), ("user/repo", "", ":"))
+        self.assertEqual(parse_repository_tag("user/repo:tag"), ("user/repo", "tag", ":"))
+        self.assertEqual(parse_repository_tag("url:5000/repo"), ("url:5000/repo", "", ":"))
+        self.assertEqual(parse_repository_tag("url:5000/repo:tag"), ("url:5000/repo", "tag", ":"))
+
+        self.assertEqual(parse_repository_tag("root@sha256:digest"), ("root", "sha256:digest", "@"))
+        self.assertEqual(parse_repository_tag("user/repo@sha256:digest"), ("user/repo", "sha256:digest", "@"))
+        self.assertEqual(parse_repository_tag("url:5000/repo@sha256:digest"), ("url:5000/repo", "sha256:digest", "@"))
 
     @mock.patch('compose.service.Container', autospec=True)
     def test_create_container_latest_is_used_when_no_tag_specified(self, mock_container):
@@ -319,7 +287,7 @@ class ServiceTest(unittest.TestCase):
 
     def test_build_does_not_pull(self):
         self.mock_client.build.return_value = [
-            '{"stream": "Successfully built 12345"}',
+            b'{"stream": "Successfully built 12345"}',
         ]
 
         service = Service('foo', client=self.mock_client, build='.')

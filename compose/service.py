@@ -1,32 +1,37 @@
-from __future__ import unicode_literals
 from __future__ import absolute_import
-from collections import namedtuple
+from __future__ import unicode_literals
+
 import logging
 import os
 import re
-import os
 import sys
+from collections import namedtuple
 from operator import attrgetter
 
 import six
 from docker.errors import APIError
-from docker.utils import create_host_config, LogConfig
+from docker.utils import create_host_config
+from docker.utils import LogConfig
+from docker.utils.ports import build_port_bindings
+from docker.utils.ports import split_port
 
 from . import __version__
-from .config import DOCKER_CONFIG_KEYS, merge_environment
-from .const import (
-    DEFAULT_TIMEOUT,
-    LABEL_CONTAINER_NUMBER,
-    LABEL_ONE_OFF,
-    LABEL_PROJECT,
-    LABEL_SERVICE,
-    LABEL_VERSION,
-    LABEL_CONFIG_HASH,
-)
+from .config import DOCKER_CONFIG_KEYS
+from .config import merge_environment
+from .config.validation import VALID_NAME_CHARS
+from .const import DEFAULT_TIMEOUT
+from .const import LABEL_CONFIG_HASH
+from .const import LABEL_CONTAINER_NUMBER
+from .const import LABEL_ONE_OFF
+from .const import LABEL_PROJECT
+from .const import LABEL_SERVICE
+from .const import LABEL_VERSION
 from .container import Container
 from .legacy import check_for_legacy_containers
-from .progress_stream import stream_output, StreamOutputError
-from .utils import json_hash, parallel_execute
+from .progress_stream import stream_output
+from .progress_stream import StreamOutputError
+from .utils import json_hash
+from .utils import parallel_execute
 
 log = logging.getLogger(__name__)
 
@@ -43,14 +48,14 @@ DOCKER_START_KEYS = [
     'net',
     'log_driver',
     'log_opt',
+    'mem_limit',
+    'memswap_limit',
     'pid',
     'privileged',
     'restart',
     'volumes_from',
     'security_opt',
 ]
-
-VALID_NAME_CHARS = '[a-zA-Z0-9\._\-]'
 
 
 class BuildError(Exception):
@@ -83,14 +88,8 @@ ConvergencePlan = namedtuple('ConvergencePlan', 'action containers')
 
 class Service(object):
     def __init__(self, name, client=None, project='default', links=None, external_links=None, volumes_from=None, net=None, **options):
-        if not re.match('^%s+$' % VALID_NAME_CHARS, name):
-            raise ConfigError('Invalid service name "%s" - only %s are allowed' % (name, VALID_NAME_CHARS))
         if not re.match('^%s+$' % VALID_NAME_CHARS, project):
             raise ConfigError('Invalid project name "%s" - only %s are allowed' % (project, VALID_NAME_CHARS))
-        if 'image' in options and 'build' in options:
-            raise ConfigError('Service %s has both an image and build path specified. A service can either be built to image or use an existing image, not both.' % name)
-        if 'image' not in options and 'build' not in options:
-            raise ConfigError('Service %s has neither an image nor a build path specified. Exactly one must be provided.' % name)
 
         self.name = name
         self.client = client
@@ -101,12 +100,14 @@ class Service(object):
         self.net = net or None
         self.options = options
 
-    def containers(self, stopped=False, one_off=False):
-        containers = [
+    def containers(self, stopped=False, one_off=False, filters={}):
+        filters.update({'label': self.labels(one_off=one_off)})
+
+        containers = list(filter(None, [
             Container.from_ps(self.client, container)
             for container in self.client.containers(
                 all=stopped,
-                filters={'label': self.labels(one_off=one_off)})]
+                filters=filters)]))
 
         if not containers:
             check_for_legacy_containers(
@@ -136,6 +137,16 @@ class Service(object):
         for c in self.containers():
             log.info("Stopping %s..." % c.name)
             c.stop(**options)
+
+    def pause(self, **options):
+        for c in self.containers(filters={'status': 'running'}):
+            log.info("Pausing %s..." % c.name)
+            c.pause(**options)
+
+    def unpause(self, **options):
+        for c in self.containers(filters={'status': 'paused'}):
+            log.info("Unpausing %s..." % c.name)
+            c.unpause()
 
     def kill(self, **options):
         for c in self.containers():
@@ -340,7 +351,7 @@ class Service(object):
         config_hash = None
 
         try:
-            config_hash = self.config_hash()
+            config_hash = self.config_hash
         except NoSuchImageError as e:
             log.debug(
                 'Service %s has diverged: %s',
@@ -465,6 +476,7 @@ class Service(object):
             else:
                 numbers.add(c.number)
 
+    @property
     def config_hash(self):
         return json_hash(self.config_dict())
 
@@ -499,12 +511,13 @@ class Service(object):
     # TODO: this would benefit from github.com/docker/docker/pull/11943
     # to remove the need to inspect every container
     def _next_container_number(self, one_off=False):
-        numbers = [
-            Container.from_ps(self.client, container).number
+        containers = filter(None, [
+            Container.from_ps(self.client, container)
             for container in self.client.containers(
                 all=True,
                 filters={'label': self.labels(one_off=one_off)})
-        ]
+        ])
+        numbers = [c.number for c in containers]
         return 1 if not numbers else max(numbers) + 1
 
     def _get_links(self, link_to_self):
@@ -577,11 +590,11 @@ class Service(object):
 
         if self.custom_container_name() and not one_off:
             container_options['name'] = self.custom_container_name()
-        else:
+        elif not container_options.get('name'):
             container_options['name'] = self.get_container_name(number, one_off)
 
         if add_config_hash:
-            config_hash = self.config_hash()
+            config_hash = self.config_hash
             if 'labels' not in container_options:
                 container_options['labels'] = {}
             container_options['labels'][LABEL_CONFIG_HASH] = config_hash
@@ -604,13 +617,13 @@ class Service(object):
         if 'ports' in container_options or 'expose' in self.options:
             ports = []
             all_ports = container_options.get('ports', []) + self.options.get('expose', [])
-            for port in all_ports:
-                port = str(port)
-                if ':' in port:
-                    port = port.split(':')[-1]
-                if '/' in port:
-                    port = tuple(port.split('/'))
-                ports.append(port)
+            for port_range in all_ports:
+                internal_range, _ = split_port(port_range)
+                for port in internal_range:
+                    port = str(port)
+                    if '/' in port:
+                        port = tuple(port.split('/'))
+                    ports.append(port)
             container_options['ports'] = ports
 
         override_options['binds'] = merge_volume_bindings(
@@ -688,6 +701,8 @@ class Service(object):
             restart_policy=restart,
             cap_add=cap_add,
             cap_drop=cap_drop,
+            mem_limit=options.get('mem_limit'),
+            memswap_limit=options.get('memswap_limit'),
             log_config=log_config,
             extra_hosts=extra_hosts,
             read_only=read_only,
@@ -698,7 +713,11 @@ class Service(object):
     def build(self, no_cache=False):
         log.info('Building %s...' % self.name)
 
-        path = six.binary_type(self.options['build'])
+        path = self.options['build']
+        # python2 os.path() doesn't support unicode, so we need to encode it to
+        # a byte string
+        if not six.PY3:
+            path = path.encode('utf8')
 
         build_output = self.client.build(
             path=path,
@@ -713,7 +732,7 @@ class Service(object):
         try:
             all_events = stream_output(build_output, sys.stdout)
         except StreamOutputError as e:
-            raise BuildError(self, unicode(e))
+            raise BuildError(self, six.text_type(e))
 
         # Ensure the HTTP connection is not reused for another
         # streaming command, as the Docker daemon can sometimes
@@ -766,9 +785,9 @@ class Service(object):
         if 'image' not in self.options:
             return
 
-        repo, tag = parse_repository_tag(self.options['image'])
+        repo, tag, separator = parse_repository_tag(self.options['image'])
         tag = tag or 'latest'
-        log.info('Pulling %s (%s:%s)...' % (self.name, repo, tag))
+        log.info('Pulling %s (%s%s%s)...' % (self.name, repo, separator, tag))
         output = self.client.pull(
             repo,
             tag=tag,
@@ -789,14 +808,31 @@ def build_container_name(project, service, number, one_off=False):
 
 # Images
 
+def parse_repository_tag(repo_path):
+    """Splits image identification into base image path, tag/digest
+    and it's separator.
 
-def parse_repository_tag(s):
-    if ":" not in s:
-        return s, ""
-    repo, tag = s.rsplit(":", 1)
-    if "/" in tag:
-        return s, ""
-    return repo, tag
+    Example:
+
+    >>> parse_repository_tag('user/repo@sha256:digest')
+    ('user/repo', 'sha256:digest', '@')
+    >>> parse_repository_tag('user/repo:v1')
+    ('user/repo', 'v1', ':')
+    """
+    tag_separator = ":"
+    digest_separator = "@"
+
+    if digest_separator in repo_path:
+        repo, tag = repo_path.rsplit(digest_separator, 1)
+        return repo, tag, digest_separator
+
+    repo, tag = repo_path, ""
+    if tag_separator in repo_path:
+        repo, tag = repo_path.rsplit(tag_separator, 1)
+        if "/" in tag:
+            repo, tag = repo_path, ""
+
+    return repo, tag, tag_separator
 
 
 # Volumes
@@ -815,7 +851,7 @@ def merge_volume_bindings(volumes_option, previous_container):
         volume_bindings.update(
             get_container_data_volumes(previous_container, volumes_option))
 
-    return volume_bindings.values()
+    return list(volume_bindings.values())
 
 
 def get_container_data_volumes(container, volumes_option):
@@ -828,7 +864,7 @@ def get_container_data_volumes(container, volumes_option):
     container_volumes = container.get('Volumes') or {}
     image_volumes = container.image_config['ContainerConfig'].get('Volumes') or {}
 
-    for volume in set(volumes_option + image_volumes.keys()):
+    for volume in set(volumes_option + list(image_volumes)):
         volume = parse_volume_spec(volume)
         # No need to preserve host volumes
         if volume.external:
@@ -866,38 +902,6 @@ def parse_volume_spec(volume_config):
     mode = parts[2] if len(parts) == 3 else 'rw'
 
     return VolumeSpec(external, internal, mode)
-
-
-# Ports
-
-
-def build_port_bindings(ports):
-    port_bindings = {}
-    for port in ports:
-        internal_port, external = split_port(port)
-        if internal_port in port_bindings:
-            port_bindings[internal_port].append(external)
-        else:
-            port_bindings[internal_port] = [external]
-    return port_bindings
-
-
-def split_port(port):
-    parts = str(port).split(':')
-    if not 1 <= len(parts) <= 3:
-        raise ConfigError('Invalid port "%s", should be '
-                          '[[remote_ip:]remote_port:]port[/protocol]' % port)
-
-    if len(parts) == 1:
-        internal_port, = parts
-        return internal_port, None
-    if len(parts) == 2:
-        external_port, internal_port = parts
-        return internal_port, external_port
-
-    external_ip, external_port, internal_port = parts
-    return internal_port, (external_ip, external_port or None)
-
 
 # Labels
 

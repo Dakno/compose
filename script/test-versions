@@ -5,7 +5,7 @@
 set -e
 
 >&2 echo "Running lint checks"
-flake8 compose tests setup.py
+tox -e pre-commit
 
 if [ "$DOCKER_VERSIONS" == "" ]; then
   DOCKER_VERSIONS="default"
@@ -19,8 +19,10 @@ for version in $DOCKER_VERSIONS; do
     --rm \
     --privileged \
     --volume="/var/lib/docker" \
+    --volume="${COVERAGE_DIR:-$(pwd)/coverage-html}:/code/coverage-html" \
     -e "DOCKER_VERSION=$version" \
+    -e "DOCKER_DAEMON_ARGS" \
     --entrypoint="script/dind" \
     "$TAG" \
-    script/wrapdocker nosetests "$@"
+    script/wrapdocker tox -e py27,py34 -- "$@"
 done

@@ -1,30 +1,35 @@
 from __future__ import print_function
 from __future__ import unicode_literals
-from inspect import getdoc
-from operator import attrgetter
+
 import logging
 import re
 import signal
 import sys
+from inspect import getdoc
+from operator import attrgetter
 
-from docker.errors import APIError
 import dockerpty
+from docker.errors import APIError
 
 from .. import __version__
 from .. import legacy
-from ..const import DEFAULT_TIMEOUT
-from ..project import NoSuchService, ConfigurationError
-from ..service import BuildError, NeedsBuildError
 from ..config import parse_environment
+from ..const import DEFAULT_TIMEOUT
 from ..progress_stream import StreamOutputError
+from ..project import ConfigurationError
+from ..project import NoSuchService
+from ..service import BuildError
+from ..service import NeedsBuildError
 from .command import Command
 from .docopt_command import NoSuchCommand
 from .errors import UserError
 from .formatter import Formatter
 from .log_printer import LogPrinter
-from .utils import yesno, get_version_info
+from .utils import get_version_info
+from .utils import yesno
 
 log = logging.getLogger(__name__)
+console_handler = logging.StreamHandler(sys.stderr)
 
 INSECURE_SSL_WARNING = """
 Warning: --allow-insecure-ssl is deprecated and has no effect.
@@ -63,9 +68,6 @@ def main():
 
 
 def setup_logging():
-    console_handler = logging.StreamHandler(sys.stderr)
-    console_handler.setFormatter(logging.Formatter())
-    console_handler.setLevel(logging.INFO)
     root_logger = logging.getLogger()
     root_logger.addHandler(console_handler)
     root_logger.setLevel(logging.DEBUG)
@@ -117,6 +119,16 @@ class TopLevelCommand(Command):
         options = super(TopLevelCommand, self).docopt_options()
         options['version'] = get_version_info('compose')
         return options
+
+    def perform_command(self, options, *args, **kwargs):
+        if options.get('--verbose'):
+            console_handler.setFormatter(logging.Formatter('%(name)s.%(funcName)s: %(message)s'))
+            console_handler.setLevel(logging.DEBUG)
+        else:
+            console_handler.setFormatter(logging.Formatter())
+            console_handler.setLevel(logging.INFO)
+
+        return super(TopLevelCommand, self).perform_command(options, *args, **kwargs)
 
     def build(self, project, options):
         """
@@ -171,6 +183,14 @@ class TopLevelCommand(Command):
         monochrome = options['--no-color']
         print("Attaching to", list_containers(containers))
         LogPrinter(containers, attach_params={'logs': True}, monochrome=monochrome).run()
+
+    def pause(self, project, options):
+        """
+        Pause services.
+
+        Usage: pause [SERVICE...]
+        """
+        project.pause(service_names=options['SERVICE'])
 
     def port(self, project, options):
         """
@@ -282,17 +302,19 @@ class TopLevelCommand(Command):
         running. If you do not want to start linked services, use
         `docker-compose run --no-deps SERVICE COMMAND [ARGS...]`.
 
-        Usage: run [options] [-e KEY=VAL...] SERVICE [COMMAND] [ARGS...]
+        Usage: run [options] [-p PORT...] [-e KEY=VAL...] SERVICE [COMMAND] [ARGS...]
 
         Options:
             --allow-insecure-ssl  Deprecated - no effect.
             -d                    Detached mode: Run container in the background, print
                                   new container name.
+            --name NAME           Assign a name to the container
             --entrypoint CMD      Override the entrypoint of the image.
             -e KEY=VAL            Set an environment variable (can be used multiple times)
             -u, --user=""         Run as specified username or uid
             --no-deps             Don't start linked services.
             --rm                  Remove container after run. Ignored in detached mode.
+            -p, --publish=[]      Publish a container's port(s) to the host
             --service-ports       Run command with the service's ports enabled and mapped
                                   to the host.
             -T                    Disable pseudo-tty allocation. By default `docker-compose run`
@@ -343,6 +365,18 @@ class TopLevelCommand(Command):
 
         if not options['--service-ports']:
             container_options['ports'] = []
+
+        if options['--publish']:
+            container_options['ports'] = options.get('--publish')
+
+        if options['--publish'] and options['--service-ports']:
+            raise UserError(
+                'Service port mapping and manual port mapping '
+                'can not be used togather'
+            )
+
+        if options['--name']:
+            container_options['name'] = options['--name']
 
         try:
             container = service.create_container(
@@ -434,6 +468,14 @@ class TopLevelCommand(Command):
         timeout = int(options.get('--timeout') or DEFAULT_TIMEOUT)
         project.restart(service_names=options['SERVICE'], timeout=timeout)
 
+    def unpause(self, project, options):
+        """
+        Unpause services.
+
+        Usage: unpause [SERVICE...]
+        """
+        project.unpause(service_names=options['SERVICE'])
+
     def up(self, project, options):
         """
         Builds, (re)creates, starts, and attaches to containers for a service.
@@ -496,19 +538,8 @@ class TopLevelCommand(Command):
         )
 
         if not detached:
-            print("Attaching to", list_containers(to_attach))
-            log_printer = LogPrinter(to_attach, attach_params={"logs": True}, monochrome=monochrome)
-
-            try:
-                log_printer.run()
-            finally:
-                def handler(signal, frame):
-                    project.kill(service_names=service_names)
-                    sys.exit(0)
-                signal.signal(signal.SIGINT, handler)
-
-                print("Gracefully stopping... (press Ctrl+C again to force)")
-                project.stop(service_names=service_names, timeout=timeout)
+            log_printer = build_log_printer(to_attach, service_names, monochrome)
+            attach_to_logs(project, log_printer, service_names, timeout)
 
     def migrate_to_labels(self, project, _options):
         """
@@ -549,6 +580,27 @@ class TopLevelCommand(Command):
             print(__version__)
         else:
             print(get_version_info('full'))
+
+
+def build_log_printer(containers, service_names, monochrome):
+    return LogPrinter(
+        [c for c in containers if c.service in service_names],
+        attach_params={"logs": True},
+        monochrome=monochrome)
+
+
+def attach_to_logs(project, log_printer, service_names, timeout):
+    print("Attaching to", list_containers(log_printer.containers))
+    try:
+        log_printer.run()
+    finally:
+        def handler(signal, frame):
+            project.kill(service_names=service_names)
+            sys.exit(0)
+        signal.signal(signal.SIGINT, handler)
+
+        print("Gracefully stopping... (press Ctrl+C again to force)")
+        project.stop(service_names=service_names, timeout=timeout)
 
 
 def list_containers(containers):

@@ -1,12 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from __future__ import unicode_literals
 from __future__ import absolute_import
-from setuptools import setup, find_packages
+from __future__ import unicode_literals
+
 import codecs
 import os
 import re
 import sys
+
+from setuptools import find_packages
+from setuptools import setup
 
 
 def read(*parts):
@@ -33,19 +36,20 @@ install_requires = [
     'docker-py >= 1.3.1, < 1.4',
     'dockerpty >= 0.3.4, < 0.4',
     'six >= 1.3.0, < 2',
+    'jsonschema >= 2.5.1, < 3',
 ]
 
 
 tests_require = [
-    'mock >= 1.0.1',
     'nose',
-    'pyinstaller',
     'flake8',
 ]
 
 
 if sys.version_info < (2, 7):
     tests_require.append('unittest2')
+if sys.version_info[:1] < (3,):
+    tests_require.append('mock >= 1.0.1')
 
 
 setup(

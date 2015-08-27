@@ -1,10 +1,12 @@
-from __future__ import unicode_literals
 from __future__ import absolute_import
+from __future__ import unicode_literals
 
-import six
 from functools import reduce
 
-from .const import LABEL_CONTAINER_NUMBER, LABEL_SERVICE
+import six
+
+from .const import LABEL_CONTAINER_NUMBER
+from .const import LABEL_SERVICE
 
 
 class Container(object):
@@ -22,10 +24,14 @@ class Container(object):
         """
         Construct a container object from the output of GET /containers/json.
         """
+        name = get_container_name(dictionary)
+        if name is None:
+            return None
+
         new_dictionary = {
             'Id': dictionary['Id'],
             'Image': dictionary['Image'],
-            'Name': '/' + get_container_name(dictionary),
+            'Name': '/' + name,
         }
         return cls(client, new_dictionary, **kwargs)
 
@@ -59,8 +65,12 @@ class Container(object):
         return self.dictionary['Name'][1:]
 
     @property
+    def service(self):
+        return self.labels.get(LABEL_SERVICE)
+
+    @property
     def name_without_project(self):
-        return '{0}_{1}'.format(self.labels.get(LABEL_SERVICE), self.number)
+        return '{0}_{1}'.format(self.service, self.number)
 
     @property
     def number(self):
@@ -96,6 +106,8 @@ class Container(object):
 
     @property
     def human_readable_state(self):
+        if self.is_paused:
+            return 'Paused'
         if self.is_running:
             return 'Ghost' if self.get('State.Ghost') else 'Up'
         else:
@@ -114,6 +126,10 @@ class Container(object):
     @property
     def is_running(self):
         return self.get('State.Running')
+
+    @property
+    def is_paused(self):
+        return self.get('State.Paused')
 
     def get(self, key):
         """Return a value from the container or None if the value is not set.
@@ -137,6 +153,12 @@ class Container(object):
 
     def stop(self, **options):
         return self.client.stop(self.id, **options)
+
+    def pause(self, **options):
+        return self.client.pause(self.id, **options)
+
+    def unpause(self, **options):
+        return self.client.unpause(self.id, **options)
 
     def kill(self, **options):
         return self.client.kill(self.id, **options)

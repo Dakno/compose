@@ -1,17 +1,25 @@
-import mock
+from __future__ import print_function
+
 import os
 import shutil
 import tempfile
-from .. import unittest
+from operator import itemgetter
 
-from compose import config
+from .. import mock
+from .. import unittest
+from compose.config import config
+from compose.config.errors import ConfigurationError
 
 
 def make_service_dict(name, service_dict, working_dir):
     """
-    Test helper function to contruct a ServiceLoader
+    Test helper function to construct a ServiceLoader
     """
     return config.ServiceLoader(working_dir=working_dir).make_service_dict(name, service_dict)
+
+
+def service_sort(services):
+    return sorted(services, key=itemgetter('name'))
 
 
 class ConfigTest(unittest.TestCase):
@@ -20,18 +28,19 @@ class ConfigTest(unittest.TestCase):
             config.ConfigDetails(
                 {
                     'foo': {'image': 'busybox'},
-                    'bar': {'environment': ['FOO=1']},
+                    'bar': {'image': 'busybox', 'environment': ['FOO=1']},
                 },
-                'working_dir',
-                'filename.yml'
+                'tests/fixtures/extends',
+                'common.yml'
             )
         )
 
         self.assertEqual(
-            sorted(service_dicts, key=lambda d: d['name']),
-            sorted([
+            service_sort(service_dicts),
+            service_sort([
                 {
                     'name': 'bar',
+                    'image': 'busybox',
                     'environment': {'FOO': '1'},
                 },
                 {
@@ -42,7 +51,7 @@ class ConfigTest(unittest.TestCase):
         )
 
     def test_load_throws_error_when_not_dict(self):
-        with self.assertRaises(config.ConfigurationError):
+        with self.assertRaises(ConfigurationError):
             config.load(
                 config.ConfigDetails(
                     {'web': 'busybox:latest'},
@@ -51,19 +60,212 @@ class ConfigTest(unittest.TestCase):
                 )
             )
 
-    def test_config_validation(self):
-        self.assertRaises(
-            config.ConfigurationError,
-            lambda: make_service_dict('foo', {'port': ['8000']}, 'tests/')
-        )
-        make_service_dict('foo', {'ports': ['8000']}, 'tests/')
+    def test_config_invalid_service_names(self):
+        with self.assertRaises(ConfigurationError):
+            for invalid_name in ['?not?allowed', ' ', '', '!', '/', '\xe2']:
+                config.load(
+                    config.ConfigDetails(
+                        {invalid_name: {'image': 'busybox'}},
+                        'working_dir',
+                        'filename.yml'
+                    )
+                )
+
+    def test_config_integer_service_name_raise_validation_error(self):
+        expected_error_msg = "Service name: 1 needs to be a string, eg '1'"
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            config.load(
+                config.ConfigDetails(
+                    {1: {'image': 'busybox'}},
+                    'working_dir',
+                    'filename.yml'
+                )
+            )
+
+    def test_config_valid_service_names(self):
+        for valid_name in ['_', '-', '.__.', '_what-up.', 'what_.up----', 'whatup']:
+            config.load(
+                config.ConfigDetails(
+                    {valid_name: {'image': 'busybox'}},
+                    'tests/fixtures/extends',
+                    'common.yml'
+                )
+            )
+
+    def test_config_invalid_ports_format_validation(self):
+        expected_error_msg = "Service 'web' configuration key 'ports' contains an invalid type"
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            for invalid_ports in [{"1": "8000"}, False, 0, "8000", 8000, ["8000", "8000"]]:
+                config.load(
+                    config.ConfigDetails(
+                        {'web': {'image': 'busybox', 'ports': invalid_ports}},
+                        'working_dir',
+                        'filename.yml'
+                    )
+                )
+
+    def test_config_valid_ports_format_validation(self):
+        valid_ports = [["8000", "9000"], ["8000/8050"], ["8000"], [8000], ["49153-49154:3002-3003"]]
+        for ports in valid_ports:
+            config.load(
+                config.ConfigDetails(
+                    {'web': {'image': 'busybox', 'ports': ports}},
+                    'working_dir',
+                    'filename.yml'
+                )
+            )
+
+    def test_config_hint(self):
+        expected_error_msg = "(did you mean 'privileged'?)"
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            config.load(
+                config.ConfigDetails(
+                    {
+                        'foo': {'image': 'busybox', 'privilige': 'something'},
+                    },
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
+            )
+
+    def test_invalid_config_build_and_image_specified(self):
+        expected_error_msg = "Service 'foo' has both an image and build path specified."
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            config.load(
+                config.ConfigDetails(
+                    {
+                        'foo': {'image': 'busybox', 'build': '.'},
+                    },
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
+            )
+
+    def test_invalid_config_type_should_be_an_array(self):
+        expected_error_msg = "Service 'foo' configuration key 'links' contains an invalid type, it should be an array"
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            config.load(
+                config.ConfigDetails(
+                    {
+                        'foo': {'image': 'busybox', 'links': 'an_link'},
+                    },
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
+            )
+
+    def test_invalid_config_not_a_dictionary(self):
+        expected_error_msg = "Top level object needs to be a dictionary."
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            config.load(
+                config.ConfigDetails(
+                    ['foo', 'lol'],
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
+            )
+
+    def test_invalid_config_not_unique_items(self):
+        expected_error_msg = "has non-unique elements"
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            config.load(
+                config.ConfigDetails(
+                    {
+                        'web': {'build': '.', 'devices': ['/dev/foo:/dev/foo', '/dev/foo:/dev/foo']}
+                    },
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
+            )
+
+    def test_invalid_list_of_strings_format(self):
+        expected_error_msg = "'command' contains an invalid type, valid types are string or list of strings"
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            config.load(
+                config.ConfigDetails(
+                    {
+                        'web': {'build': '.', 'command': [1]}
+                    },
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
+            )
 
 
-class VolumePathTest(unittest.TestCase):
+class InterpolationTest(unittest.TestCase):
     @mock.patch.dict(os.environ)
-    def test_volume_binding_with_environ(self):
+    def test_config_file_with_environment_variable(self):
+        os.environ.update(
+            IMAGE="busybox",
+            HOST_PORT="80",
+            LABEL_VALUE="myvalue",
+        )
+
+        service_dicts = config.load(
+            config.find('tests/fixtures/environment-interpolation', None),
+        )
+
+        self.assertEqual(service_dicts, [
+            {
+                'name': 'web',
+                'image': 'busybox',
+                'ports': ['80:8000'],
+                'labels': {'mylabel': 'myvalue'},
+                'hostname': 'host-',
+                'command': '${ESCAPED}',
+            }
+        ])
+
+    @mock.patch.dict(os.environ)
+    def test_unset_variable_produces_warning(self):
+        os.environ.pop('FOO', None)
+        os.environ.pop('BAR', None)
+        config_details = config.ConfigDetails(
+            config={
+                'web': {
+                    'image': '${FOO}',
+                    'command': '${BAR}',
+                    'entrypoint': '${BAR}',
+                },
+            },
+            working_dir='.',
+            filename=None,
+        )
+
+        with mock.patch('compose.config.interpolation.log') as log:
+            config.load(config_details)
+
+            self.assertEqual(2, log.warn.call_count)
+            warnings = sorted(args[0][0] for args in log.warn.call_args_list)
+            self.assertIn('BAR', warnings[0])
+            self.assertIn('FOO', warnings[1])
+
+    @mock.patch.dict(os.environ)
+    def test_invalid_interpolation(self):
+        with self.assertRaises(config.ConfigurationError) as cm:
+            config.load(
+                config.ConfigDetails(
+                    {'web': {'image': '${'}},
+                    'working_dir',
+                    'filename.yml'
+                )
+            )
+
+        self.assertIn('Invalid', cm.exception.msg)
+        self.assertIn('for "image" option', cm.exception.msg)
+        self.assertIn('in service "web"', cm.exception.msg)
+        self.assertIn('"${"', cm.exception.msg)
+
+    @mock.patch.dict(os.environ)
+    def test_volume_binding_with_environment_variable(self):
         os.environ['VOLUME_PATH'] = '/host/path'
-        d = make_service_dict('foo', {'volumes': ['${VOLUME_PATH}:/container/path']}, working_dir='.')
+        d = config.load(
+            config.ConfigDetails(
+                config={'foo': {'build': '.', 'volumes': ['${VOLUME_PATH}:/container/path']}},
+                working_dir='.',
+                filename=None,
+            )
+        )[0]
         self.assertEqual(d['volumes'], ['/host/path:/container/path'])
 
     @mock.patch.dict(os.environ)
@@ -72,7 +274,52 @@ class VolumePathTest(unittest.TestCase):
         d = make_service_dict('foo', {'volumes': ['~:/container/path']}, working_dir='.')
         self.assertEqual(d['volumes'], ['/home/user:/container/path'])
 
-    def test_named_volume_with_driver(self):
+    @mock.patch.dict(os.environ)
+    def test_volume_binding_with_local_dir_name_raises_warning(self):
+        def make_dict(**config):
+            make_service_dict('foo', config, working_dir='.')
+
+        with mock.patch('compose.config.config.log.warn') as warn:
+            make_dict(volumes=['/container/path'])
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['/data:/container/path'])
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['.:/container/path'])
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['..:/container/path'])
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['./data:/container/path'])
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['../data:/container/path'])
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['.profile:/container/path'])
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['~:/container/path'])
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['~/data:/container/path'])
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['~tmp:/container/path'])
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['data:/container/path'], volume_driver='mydriver')
+            self.assertEqual(0, warn.call_count)
+
+            make_dict(volumes=['data:/container/path'])
+            self.assertEqual(1, warn.call_count)
+            warning = warn.call_args[0][0]
+            self.assertIn('"data:/container/path"', warning)
+            self.assertIn('"./data:/container/path"', warning)
+
+    def test_named_volume_with_driver_does_not_expand(self):
         d = make_service_dict('foo', {
             'volumes': ['namedvolume:/data'],
             'volume_driver': 'foodriver',
@@ -80,13 +327,13 @@ class VolumePathTest(unittest.TestCase):
         self.assertEqual(d['volumes'], ['namedvolume:/data'])
 
     @mock.patch.dict(os.environ)
-    def test_named_volume_with_special_chars(self):
+    def test_home_directory_with_driver_does_not_expand(self):
         os.environ['NAME'] = 'surprise!'
         d = make_service_dict('foo', {
-            'volumes': ['~/${NAME}:/data'],
+            'volumes': ['~:/data'],
             'volume_driver': 'foodriver',
         }, working_dir='.')
-        self.assertEqual(d['volumes'], ['~/${NAME}:/data'])
+        self.assertEqual(d['volumes'], ['~:/data'])
 
 
 class MergePathMappingTest(object):
@@ -282,23 +529,40 @@ class MemoryOptionsTest(unittest.TestCase):
         When you set a 'memswap_limit' it is invalid config unless you also set
         a mem_limit
         """
-        with self.assertRaises(config.ConfigurationError):
-            make_service_dict(
-                'foo', {
-                    'memswap_limit': 2000000,
-                },
-                'tests/'
+        expected_error_msg = (
+            "Invalid 'memswap_limit' configuration for 'foo' service: when "
+            "defining 'memswap_limit' you must set 'mem_limit' as well"
+        )
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            config.load(
+                config.ConfigDetails(
+                    {
+                        'foo': {'image': 'busybox', 'memswap_limit': 2000000},
+                    },
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
             )
 
     def test_validation_with_correct_memswap_values(self):
-        service_dict = make_service_dict(
-            'foo', {
-                'mem_limit': 1000000,
-                'memswap_limit': 2000000,
-            },
-            'tests/'
+        service_dict = config.load(
+            config.ConfigDetails(
+                {'foo': {'image': 'busybox', 'mem_limit': 1000000, 'memswap_limit': 2000000}},
+                'tests/fixtures/extends',
+                'common.yml'
+            )
         )
-        self.assertEqual(service_dict['memswap_limit'], 2000000)
+        self.assertEqual(service_dict[0]['memswap_limit'], 2000000)
+
+    def test_memswap_can_be_a_string(self):
+        service_dict = config.load(
+            config.ConfigDetails(
+                {'foo': {'image': 'busybox', 'mem_limit': "1G", 'memswap_limit': "512M"}},
+                'tests/fixtures/extends',
+                'common.yml'
+            )
+        )
+        self.assertEqual(service_dict[0]['memswap_limit'], "512M")
 
 
 class EnvTest(unittest.TestCase):
@@ -322,7 +586,7 @@ class EnvTest(unittest.TestCase):
         self.assertEqual(config.parse_environment(environment), environment)
 
     def test_parse_environment_invalid(self):
-        with self.assertRaises(config.ConfigurationError):
+        with self.assertRaises(ConfigurationError):
             config.parse_environment('a=b')
 
     def test_parse_environment_empty(self):
@@ -376,7 +640,7 @@ class EnvTest(unittest.TestCase):
     def test_env_nonexistent_file(self):
         options = {'env_file': 'nonexistent.env'}
         self.assertRaises(
-            config.ConfigurationError,
+            ConfigurationError,
             lambda: make_service_dict('foo', options, 'tests/fixtures/env'),
         )
 
@@ -400,18 +664,22 @@ class EnvTest(unittest.TestCase):
         os.environ['HOSTENV'] = '/tmp'
         os.environ['CONTAINERENV'] = '/host/tmp'
 
-        service_dict = make_service_dict(
-            'foo',
-            {'volumes': ['$HOSTENV:$CONTAINERENV']},
-            working_dir="tests/fixtures/env"
-        )
+        service_dict = config.load(
+            config.ConfigDetails(
+                config={'foo': {'build': '.', 'volumes': ['$HOSTENV:$CONTAINERENV']}},
+                working_dir="tests/fixtures/env",
+                filename=None,
+            )
+        )[0]
         self.assertEqual(set(service_dict['volumes']), set(['/tmp:/host/tmp']))
 
-        service_dict = make_service_dict(
-            'foo',
-            {'volumes': ['/opt${HOSTENV}:/opt${CONTAINERENV}']},
-            working_dir="tests/fixtures/env"
-        )
+        service_dict = config.load(
+            config.ConfigDetails(
+                config={'foo': {'build': '.', 'volumes': ['/opt${HOSTENV}:/opt${CONTAINERENV}']}},
+                working_dir="tests/fixtures/env",
+                filename=None,
+            )
+        )[0]
         self.assertEqual(set(service_dict['volumes']), set(['/opt/tmp:/opt/host/tmp']))
 
 
@@ -423,12 +691,7 @@ class ExtendsTest(unittest.TestCase):
     def test_extends(self):
         service_dicts = load_from_filename('tests/fixtures/extends/docker-compose.yml')
 
-        service_dicts = sorted(
-            service_dicts,
-            key=lambda sd: sd['name'],
-        )
-
-        self.assertEqual(service_dicts, [
+        self.assertEqual(service_sort(service_dicts), service_sort([
             {
                 'name': 'mydb',
                 'image': 'busybox',
@@ -445,7 +708,7 @@ class ExtendsTest(unittest.TestCase):
                     "BAZ": "2",
                 },
             }
-        ])
+        ]))
 
     def test_nested(self):
         service_dicts = load_from_filename('tests/fixtures/extends/nested.yml')
@@ -467,7 +730,7 @@ class ExtendsTest(unittest.TestCase):
         We specify a 'file' key that is the filename we're already in.
         """
         service_dicts = load_from_filename('tests/fixtures/extends/specify-file-as-self.yml')
-        self.assertEqual(service_dicts, [
+        self.assertEqual(service_sort(service_dicts), service_sort([
             {
                 'environment':
                 {
@@ -479,6 +742,7 @@ class ExtendsTest(unittest.TestCase):
             {
                 'environment':
                 {'YEP': '1'},
+                'image': 'busybox',
                 'name': 'otherweb'
             },
             {
@@ -487,7 +751,7 @@ class ExtendsTest(unittest.TestCase):
                 'image': 'busybox',
                 'name': 'web'
             }
-        ])
+        ]))
 
     def test_circular(self):
         try:
@@ -504,36 +768,67 @@ class ExtendsTest(unittest.TestCase):
             )
 
     def test_extends_validation_empty_dictionary(self):
-        dictionary = {'extends': None}
-
-        def load_config():
-            return make_service_dict('myweb', dictionary, working_dir='tests/fixtures/extends')
-
-        self.assertRaisesRegexp(config.ConfigurationError, 'dictionary', load_config)
-
-        dictionary['extends'] = {}
-        self.assertRaises(config.ConfigurationError, load_config)
+        with self.assertRaisesRegexp(ConfigurationError, 'service'):
+            config.load(
+                config.ConfigDetails(
+                    {
+                        'web': {'image': 'busybox', 'extends': {}},
+                    },
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
+            )
 
     def test_extends_validation_missing_service_key(self):
-        dictionary = {'extends': {'file': 'common.yml'}}
-
-        def load_config():
-            return make_service_dict('myweb', dictionary, working_dir='tests/fixtures/extends')
-
-        self.assertRaisesRegexp(config.ConfigurationError, 'service', load_config)
+        with self.assertRaisesRegexp(ConfigurationError, "'service' is a required property"):
+            config.load(
+                config.ConfigDetails(
+                    {
+                        'web': {'image': 'busybox', 'extends': {'file': 'common.yml'}},
+                    },
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
+            )
 
     def test_extends_validation_invalid_key(self):
-        dictionary = {
-            'extends':
-            {
-                'service': 'web', 'file': 'common.yml', 'what': 'is this'
-            }
-        }
+        expected_error_msg = "Unsupported config option for 'web' service: 'rogue_key'"
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            config.load(
+                config.ConfigDetails(
+                    {
+                        'web': {
+                            'image': 'busybox',
+                            'extends': {
+                                'file': 'common.yml',
+                                'service': 'web',
+                                'rogue_key': 'is not allowed'
+                            }
+                        },
+                    },
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
+            )
 
-        def load_config():
-            return make_service_dict('myweb', dictionary, working_dir='tests/fixtures/extends')
-
-        self.assertRaisesRegexp(config.ConfigurationError, 'what', load_config)
+    def test_extends_validation_sub_property_key(self):
+        expected_error_msg = "Service 'web' configuration key 'extends' 'file' contains an invalid type"
+        with self.assertRaisesRegexp(ConfigurationError, expected_error_msg):
+            config.load(
+                config.ConfigDetails(
+                    {
+                        'web': {
+                            'image': 'busybox',
+                            'extends': {
+                                'file': 1,
+                                'service': 'web',
+                            }
+                        },
+                    },
+                    'tests/fixtures/extends',
+                    'filename.yml'
+                )
+            )
 
     def test_extends_validation_no_file_key_no_filename_set(self):
         dictionary = {'extends': {'service': 'web'}}
@@ -541,15 +836,21 @@ class ExtendsTest(unittest.TestCase):
         def load_config():
             return make_service_dict('myweb', dictionary, working_dir='tests/fixtures/extends')
 
-        self.assertRaisesRegexp(config.ConfigurationError, 'file', load_config)
+        self.assertRaisesRegexp(ConfigurationError, 'file', load_config)
 
     def test_extends_validation_valid_config(self):
-        dictionary = {'extends': {'service': 'web', 'file': 'common.yml'}}
+        service = config.load(
+            config.ConfigDetails(
+                {
+                    'web': {'image': 'busybox', 'extends': {'service': 'web', 'file': 'common.yml'}},
+                },
+                'tests/fixtures/extends',
+                'common.yml'
+            )
+        )
 
-        def load_config():
-            return make_service_dict('myweb', dictionary, working_dir='tests/fixtures/extends')
-
-        self.assertIsInstance(load_config(), dict)
+        self.assertEquals(len(service), 1)
+        self.assertIsInstance(service[0], dict)
 
     def test_extends_file_defaults_to_self(self):
         """
@@ -557,7 +858,7 @@ class ExtendsTest(unittest.TestCase):
         config is valid and correctly extends from itself.
         """
         service_dicts = load_from_filename('tests/fixtures/extends/no-file-specified.yml')
-        self.assertEqual(service_dicts, [
+        self.assertEqual(service_sort(service_dicts), service_sort([
             {
                 'name': 'myweb',
                 'image': 'busybox',
@@ -573,7 +874,7 @@ class ExtendsTest(unittest.TestCase):
                     "BAZ": "3",
                 }
             }
-        ])
+        ]))
 
     def test_blacklisted_options(self):
         def load_config():
@@ -584,28 +885,28 @@ class ExtendsTest(unittest.TestCase):
                 }
             }, '.')
 
-        with self.assertRaisesRegexp(config.ConfigurationError, 'links'):
+        with self.assertRaisesRegexp(ConfigurationError, 'links'):
             other_config = {'web': {'links': ['db']}}
 
             with mock.patch.object(config, 'load_yaml', return_value=other_config):
-                print load_config()
+                print(load_config())
 
-        with self.assertRaisesRegexp(config.ConfigurationError, 'volumes_from'):
+        with self.assertRaisesRegexp(ConfigurationError, 'volumes_from'):
             other_config = {'web': {'volumes_from': ['db']}}
 
             with mock.patch.object(config, 'load_yaml', return_value=other_config):
-                print load_config()
+                print(load_config())
 
-        with self.assertRaisesRegexp(config.ConfigurationError, 'net'):
+        with self.assertRaisesRegexp(ConfigurationError, 'net'):
             other_config = {'web': {'net': 'container:db'}}
 
             with mock.patch.object(config, 'load_yaml', return_value=other_config):
-                print load_config()
+                print(load_config())
 
         other_config = {'web': {'net': 'host'}}
 
         with mock.patch.object(config, 'load_yaml', return_value=other_config):
-            print load_config()
+            print(load_config())
 
     def test_volume_path(self):
         dicts = load_from_filename('tests/fixtures/volume-path/docker-compose.yml')
@@ -632,13 +933,18 @@ class ExtendsTest(unittest.TestCase):
             },
         ])
 
+    def test_load_throws_error_when_base_service_does_not_exist(self):
+        err_msg = r'''Cannot extend service 'foo' in .*: Service not found'''
+        with self.assertRaisesRegexp(ConfigurationError, err_msg):
+            load_from_filename('tests/fixtures/extends/nonexistent-service.yml')
+
 
 class BuildPathTest(unittest.TestCase):
     def setUp(self):
         self.abs_context_path = os.path.join(os.getcwd(), 'tests/fixtures/build-ctx')
 
     def test_nonexistent_path(self):
-        with self.assertRaises(config.ConfigurationError):
+        with self.assertRaises(ConfigurationError):
             config.load(
                 config.ConfigDetails(
                     {

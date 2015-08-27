@@ -1,15 +1,18 @@
-from __future__ import unicode_literals
 from __future__ import absolute_import
+from __future__ import unicode_literals
+
 import os
 
+import six
+
 from compose.cli.log_printer import LogPrinter
-from .. import unittest
+from tests import unittest
 
 
 class LogPrinterTest(unittest.TestCase):
     def get_default_output(self, monochrome=False):
         def reader(*args, **kwargs):
-            yield "hello\nworld"
+            yield b"hello\nworld"
 
         container = MockContainer(reader)
         output = run_log_printer([container], monochrome=monochrome)
@@ -30,13 +33,15 @@ class LogPrinterTest(unittest.TestCase):
         self.assertIn('\033[', output)
 
     def test_unicode(self):
-        glyph = u'\u2022'.encode('utf-8')
+        glyph = u'\u2022'
 
         def reader(*args, **kwargs):
-            yield glyph + b'\n'
+            yield glyph.encode('utf-8') + b'\n'
 
         container = MockContainer(reader)
         output = run_log_printer([container])
+        if six.PY2:
+            output = output.decode('utf-8')
 
         self.assertIn(glyph, output)
 

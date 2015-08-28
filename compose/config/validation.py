@@ -17,6 +17,7 @@ DOCKER_CONFIG_HINTS = {
     'extra_host': 'extra_hosts',
     'device': 'devices',
     'link': 'links',
+    'load_image': 'load_image',
     'memory_swap': 'memswap_limit',
     'port': 'ports',
     'privilege': 'privileged',
